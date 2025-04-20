@@ -21,19 +21,20 @@ def WifiTransmitter(*args):
         message=args[0]
         level=int(args[1])
         snr=int(args[2])
-    
+
 	## Sanity checks
     if len(message) > 10000:
         raise Exception("Error: Message is too long")
     if level>4 or level<1:
         raise Exception("Error:Invalid Level, must be 1-4")
 
-    
+
     nfft = 64
     Interleave = np.reshape(np.transpose(np.reshape(np.arange(1, 2*nfft+1, 1),[-1,4])),[-1,])
     length = len(message)
     preamble = np.array([1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1,1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1])
     cc1 = check.Trellis(np.array([3]),np.array([[0o7,0o5]]))
+
     if level >= 1:
         bits = np.unpackbits(np.array([ord(c) for c in message], dtype=np.uint8))
         bits = np.pad(bits, (0, 2*nfft-len(bits)%(2*nfft)),'constant')
@@ -42,7 +43,7 @@ def WifiTransmitter(*args):
         for i in range(nsym):
             symbol = bits[i*2*nfft:(i+1)*2*nfft]
             output[i*2*nfft:(i+1)*2*nfft] = symbol[Interleave-1]
-            
+
         # repetitive encoding for the length field
         length_encoded = ''.join([b+b+b for b in np.binary_repr(length)])
         len_binary = np.array(list(length_encoded.zfill(2*nfft))).astype(np.int8)
