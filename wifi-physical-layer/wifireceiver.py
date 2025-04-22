@@ -82,8 +82,16 @@ def WifiReceiver(input_stream, level):
         mod = comm.modulation.QAMModem(4)
         demod = mod.demodulate(input_stream, demod_type='hard')
 
-        decoded_bits = viterbi_decode_hard(demod, cc1)
-        input_stream = decoded_bits
+        # remove preamble
+        demod = demod[len(preamble):]
+
+        # split into encoded length and message
+        encoded_length = demod[:2*nfft]
+        message = demod[2*nfft:]
+
+        # viterbi decode to get interleaved bits (which are handled by level 1)
+        decoded_bits = viterbi_decode_hard(message, cc1)
+        input_stream = np.concatenate((encoded_length, decoded_bits))
 
     if level >= 1:
         #Input Interleaved bits + Encoded Length
