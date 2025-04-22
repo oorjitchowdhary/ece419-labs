@@ -8,10 +8,53 @@ from pip import main
 import matplotlib.pyplot as plt
 
 
-def WifiReceiver(input_stream, level):
+def viterbi_decode_hard(bits, trellis):
+    num_states = trellis.number_states
+    k, n = trellis.k, trellis.n
 
+    num_steps = len(bits) // n
+
+    path_metrics = np.full((num_states,), np.inf)
+    path_metrics[0] = 0
+    traceback = np.zeros((num_steps, num_states), dtype=int)
+
+    for t in range(num_steps):
+        new_metrics = np.full((num_states,), np.inf)
+        received = bits[t * n:(t + 1) * n]
+
+        for prev_state in range(num_states):
+            for input_bit in range(2 ** k):  # 0 or 1 if k=1
+                next_state = trellis.next_state_table[prev_state, input_bit]
+                expected = np.array(list(np.binary_repr(trellis.output_table[prev_state, input_bit], width=n)), dtype=int)
+                metric = np.sum(received != expected)  # Hamming distance
+
+                candidate_metric = path_metrics[prev_state] + metric
+                if candidate_metric < new_metrics[next_state]:
+                    new_metrics[next_state] = candidate_metric
+                    traceback[t, next_state] = prev_state
+
+        path_metrics = new_metrics
+
+    # Backtrack
+    states = np.zeros(num_steps, dtype=int)
+    states[-1] = np.argmin(path_metrics)
+    for t in range(num_steps - 1, 0, -1):
+        states[t - 1] = traceback[t, states[t]]
+
+    # Recover input bits from transitions
+    decoded_bits = []
+    for t in range(num_steps):
+        prev = states[t - 1] if t > 0 else 0
+        for input_bit in range(2 ** k):
+            if trellis.next_state_table[prev, input_bit] == states[t]:
+                decoded_bits.append(input_bit)
+                break
+
+    return np.array(decoded_bits, dtype=int)
+
+
+def WifiReceiver(input_stream, level):
     nfft = 64
-    Interleave_tr = np.reshape(np.transpose(np.reshape(np.arange(1, 2*nfft+1, 1),[4,-1])),[-1,])
     Interleave_tr = np.reshape(np.transpose(np.reshape(np.arange(1, 2*nfft+1, 1),[-1,4])),[-1,])
     preamble = np.array([1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1,1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1])
     cc1 = check.Trellis(np.array([3]),np.array([[0o7,0o5]]))
@@ -34,8 +77,14 @@ def WifiReceiver(input_stream, level):
     if level >= 2:
         #Input QAM modulated + Encoded Bits
         #Output Interleaved bits + Encoded Length
-        input_stream=input_stream
-       
+
+        # demodulate the stream
+        mod = comm.modulation.QAMModem(4)
+        demod = mod.demodulate(input_stream, demod_type='hard')
+
+        decoded_bits = viterbi_decode_hard(demod, cc1)
+        input_stream = decoded_bits
+
     if level >= 1:
         #Input Interleaved bits + Encoded Length
         #Output Deinterleaved bits
@@ -74,11 +123,12 @@ def WifiReceiver(input_stream, level):
 # for testing purpose
 from wifitransmitter import WifiTransmitter
 if __name__ == "__main__":
-    np.set_printoptions(threshold=sys.maxsize)
     test_case = 'The Internet has transformed our everyday lives, bringing people closer together and powering multi-billion dollar industries. The mobile revolution has brought Internet connectivity to the last-mile, connecting billions of users worldwide. But how does the Internet work? What do oft repeated acronyms like "LTE", "TCP", "WWW" or a "HTTP" actually mean and how do they work? This course introduces fundamental concepts of computer networks that form the building blocks of the Internet. We trace the journey of messages sent over the Internet from bits in a computer or phone to packets and eventually signals over the air or wires. We describe commonalities and differences between traditional wired computer networks from wireless and mobile networks. Finally, we build up to exciting new trends in computer networks such as the Internet of Things, 5-G and software defined networking. Topics include: physical layer and coding (CDMA, OFDM, etc.); data link protocol; flow control, congestion control, routing; local area networks (Ethernet, Wi-Fi, etc.); transport layer; and introduction to cellular (LTE) and 5-G networks. The course will be graded based on quizzes (on canvas), a midterm and final exam and four projects (all individual). '
+    test_case = 'hello world'
     print(test_case)
-    output = WifiTransmitter(test_case, 1)
-    print(output)
-    begin_zero_padding, message, length_y = WifiReceiver(output, 1)
+    output = WifiTransmitter(test_case, 2)
+    begin_zero_padding, message, length_y = WifiReceiver(output, 2)
     print(begin_zero_padding, message, length_y)
     print(test_case == message)
+    print(repr(test_case))
+    print(repr(message))
