@@ -8,6 +8,22 @@ from pip import main
 import matplotlib.pyplot as plt
 
 
+def find_start_index(signal, preamble):
+    preamble = preamble / np.linalg.norm(preamble)
+    max_corr = -np.inf
+    best_index = 0
+
+    for i in range(len(signal) - len(preamble)):
+        window = signal[i:i + len(preamble)]
+        norm_window = window / (np.linalg.norm(window) + 1e-10)
+        corr = np.abs(np.dot(preamble, norm_window))
+        if corr > max_corr:
+            max_corr = corr
+            best_index = i
+
+    return best_index
+
+
 def viterbi_decode_hard(bits, trellis):
     num_states = trellis.number_states
     k, n = trellis.k, trellis.n
@@ -67,7 +83,7 @@ def WifiReceiver(input_stream, level):
     if level >= 4:
         #Input QAM modulated + Encoded Bits + OFDM Symbols in a long stream
         #Output Detected Packet set of symbols
-        input_stream=input_stream
+        begin_zero_padding, input_stream, length = input_stream
 
     if level >= 3:
         #Input QAM modulated + Encoded Bits + OFDM Symbols
@@ -87,7 +103,10 @@ def WifiReceiver(input_stream, level):
         demod = mod.demodulate(input_stream, demod_type='hard')
 
         # remove preamble
+        preamble_start_index = find_start_index(demod, preamble)
+        demod = demod[preamble_start_index:]
         demod = demod[len(preamble):]
+        begin_zero_padding = preamble_start_index
 
         # split into encoded length and message
         encoded_length = demod[:2*nfft]
@@ -138,8 +157,8 @@ if __name__ == "__main__":
     test_case = 'The Internet has transformed our everyday lives, bringing people closer together and powering multi-billion dollar industries. The mobile revolution has brought Internet connectivity to the last-mile, connecting billions of users worldwide. But how does the Internet work? What do oft repeated acronyms like "LTE", "TCP", "WWW" or a "HTTP" actually mean and how do they work? This course introduces fundamental concepts of computer networks that form the building blocks of the Internet. We trace the journey of messages sent over the Internet from bits in a computer or phone to packets and eventually signals over the air or wires. We describe commonalities and differences between traditional wired computer networks from wireless and mobile networks. Finally, we build up to exciting new trends in computer networks such as the Internet of Things, 5-G and software defined networking. Topics include: physical layer and coding (CDMA, OFDM, etc.); data link protocol; flow control, congestion control, routing; local area networks (Ethernet, Wi-Fi, etc.); transport layer; and introduction to cellular (LTE) and 5-G networks. The course will be graded based on quizzes (on canvas), a midterm and final exam and four projects (all individual). '
     test_case = 'hello world'
     print(test_case)
-    output = WifiTransmitter(test_case, 3)
-    begin_zero_padding, message, length_y = WifiReceiver(output, 3)
+    output = WifiTransmitter(test_case, 4)
+    begin_zero_padding, message, length_y = WifiReceiver(output, 4)
     print(begin_zero_padding, message, length_y)
     print(test_case == message)
     print(repr(test_case))
