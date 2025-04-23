@@ -9,16 +9,15 @@ import matplotlib.pyplot as plt
 
 
 def find_start_index(signal, preamble):
-    preamble = preamble / np.linalg.norm(preamble)
-    max_corr = -np.inf
     best_index = 0
+    max_matches = -1
 
+    # sliding window to find the best match for the preamble
     for i in range(len(signal) - len(preamble)):
         window = signal[i:i + len(preamble)]
-        norm_window = window / (np.linalg.norm(window) + 1e-10)
-        corr = np.abs(np.dot(preamble, norm_window))
-        if corr > max_corr:
-            max_corr = corr
+        matches = np.sum(window == preamble) # count bits in window exactly equal to preamble
+        if matches > max_matches:
+            max_matches = matches
             best_index = i
 
     return best_index
@@ -27,13 +26,14 @@ def find_start_index(signal, preamble):
 def viterbi_decode_hard(bits, trellis):
     num_states = trellis.number_states
     k, n = trellis.k, trellis.n
-
     num_steps = len(bits) // n
 
+    # initialize metrics and traceback
     path_metrics = np.full((num_states,), np.inf)
     path_metrics[0] = 0
     traceback = np.zeros((num_steps, num_states), dtype=int)
 
+    # forward pass to compute path metrics over time in the trellis
     for t in range(num_steps):
         new_metrics = np.full((num_states,), np.inf)
         received = bits[t * n:(t + 1) * n]
@@ -51,13 +51,13 @@ def viterbi_decode_hard(bits, trellis):
 
         path_metrics = new_metrics
 
-    # Backtrack
+    # backtrack to find the best path
     states = np.zeros(num_steps, dtype=int)
     states[-1] = np.argmin(path_metrics)
     for t in range(num_steps - 1, 0, -1):
         states[t - 1] = traceback[t, states[t]]
 
-    # Recover input bits from transitions
+    # recover input bits causing the state transitions
     decoded_bits = []
     for t in range(num_steps):
         prev = states[t - 1] if t > 0 else 0
@@ -83,13 +83,23 @@ def WifiReceiver(input_stream, level):
     if level >= 4:
         #Input QAM modulated + Encoded Bits + OFDM Symbols in a long stream
         #Output Detected Packet set of symbols
-        begin_zero_padding, input_stream, length = input_stream
+
+        # unpack to find zero padding and message length if provided
+        if isinstance(input_stream, tuple) and len(input_stream) == 3:
+            begin_zero_padding, input_stream, length = input_stream
+
+        # find zero padding through preamble indexing
+        else:
+            begin_zero_padding = find_start_index(input_stream, preamble)
+
+        # remove initial padding
         input_stream = input_stream[begin_zero_padding:]
 
     if level >= 3:
         #Input QAM modulated + Encoded Bits + OFDM Symbols
         #Output QAM modulated + Encoded Bits
 
+        # use FFT to switch to frequency domain
         nsym = int(len(input_stream)/nfft)
         for i in range(nsym):
             symbol = input_stream[i*nfft:(i+1)*nfft]
@@ -112,6 +122,8 @@ def WifiReceiver(input_stream, level):
 
         # viterbi decode to get interleaved bits (which are handled by level 1)
         decoded_bits = viterbi_decode_hard(message, cc1)
+
+        # prepare input for level 1 handling
         input_stream = np.concatenate((encoded_length, decoded_bits))
 
     if level >= 1:
@@ -133,6 +145,7 @@ def WifiReceiver(input_stream, level):
         deinterleave = np.zeros_like(Interleave_tr)
         deinterleave[Interleave_tr-1] = np.arange(2 * nfft)
 
+        # deinterleave the stream
         nsym = len(chunks) // (2 * nfft)
         deinterleaved = np.zeros_like(chunks, dtype=np.int8)
         for i in range(nsym):
@@ -159,5 +172,3 @@ if __name__ == "__main__":
     begin_zero_padding, message, length_y = WifiReceiver(output, 4)
     print(begin_zero_padding, message, length_y)
     print(test_case == message)
-    print(repr(test_case))
-    print(repr(message))
