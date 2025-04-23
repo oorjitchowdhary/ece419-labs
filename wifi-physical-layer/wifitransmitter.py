@@ -56,23 +56,25 @@ def WifiTransmitter(*args):
         output = np.concatenate((preamble, output))
         mod = comm.modulation.QAMModem(4)
         output = mod.modulate(output.astype(bool))
-        
+
     if level >= 3:
         nsym = int(len(output)/nfft)
         for i in range(nsym):
             symbol = output[i*nfft:(i+1)*nfft]
             output[i*nfft:(i+1)*nfft] = np.fft.ifft(symbol)
-    
+
     if level >= 4:
         noise_pad_begin = np.zeros(np.random.randint(1,1000))
         noise_pad_begin_length = len(noise_pad_begin)
         noise_pad_end = np.zeros(np.random.randint(1,1000))
         output = np.concatenate((noise_pad_begin,output,noise_pad_end))
         output = comm.channels.awgn(output,snr)
-        return noise_pad_begin_length, output, length
-            
+        print("Noise Padding Begin Length:", noise_pad_begin_length)
+        print("Noise Padding End Length:", len(noise_pad_end))
+        print("Output Length:", len(output))
+
     return output
-    
+
 if __name__ == '__main__':
     if len(sys.argv)<2:
         raise Exception("Error: No message was provided")
