@@ -84,6 +84,7 @@ def WifiReceiver(input_stream, level):
         #Input QAM modulated + Encoded Bits + OFDM Symbols in a long stream
         #Output Detected Packet set of symbols
         begin_zero_padding, input_stream, length = input_stream
+        input_stream = input_stream[begin_zero_padding:]
 
     if level >= 3:
         #Input QAM modulated + Encoded Bits + OFDM Symbols
@@ -103,10 +104,7 @@ def WifiReceiver(input_stream, level):
         demod = mod.demodulate(input_stream, demod_type='hard')
 
         # remove preamble
-        preamble_start_index = find_start_index(demod, preamble)
-        demod = demod[preamble_start_index:]
         demod = demod[len(preamble):]
-        begin_zero_padding = preamble_start_index
 
         # split into encoded length and message
         encoded_length = demod[:2*nfft]
