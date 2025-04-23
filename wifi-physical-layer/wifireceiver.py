@@ -10,14 +10,16 @@ import matplotlib.pyplot as plt
 
 def find_start_index(signal, preamble):
     best_index = 0
-    max_matches = np.inf
+    min_difference = np.inf
 
     # sliding window to find the best match for the preamble
-    for i in range(len(signal) - len(preamble)):
+    for i in range(len(signal) - len(preamble) + 1):
         window = signal[i:i + len(preamble)]
-        matches = np.sum(np.abs(window - preamble)) # count bits in window exactly equal to preamble
-        if matches < max_matches:
-            max_matches = matches
+        # measure similarity using absolute difference
+        difference = np.sum(np.abs(window - preamble))
+
+        if difference < min_difference:
+            min_difference = difference
             best_index = i
 
     return best_index
@@ -84,30 +86,18 @@ def WifiReceiver(input_stream, level):
         #Input QAM modulated + Encoded Bits + OFDM Symbols in a long stream
         #Output Detected Packet set of symbols
 
-        # # unpack to find zero padding and message length if provided
-        # if isinstance(input_stream, tuple) and len(input_stream) == 3:
-        #     begin_zero_padding, input_stream, length = input_stream
-
-        # # find zero padding through preamble indexing
-        # else:
-        print("input stream length", len(input_stream))
-
-        # make preamble into signal-like array
+        # make preamble into the same format as the input stream to find initial padding
         mod = comm.modulation.QAMModem(4)
         preamble = mod.modulate(preamble.astype(bool))
-
         nsym = int(len(preamble)/nfft)
         for i in range(nsym):
             symbol = preamble[i*nfft:(i+1)*nfft]
             preamble[i*nfft:(i+1)*nfft] = np.fft.ifft(symbol)
 
-        begin_zero_padding = find_start_index(input_stream, preamble)
-        print("begin_zero_padding length", begin_zero_padding)
-
         # remove initial padding
+        begin_zero_padding = find_start_index(input_stream, preamble)
         input_stream = input_stream[begin_zero_padding:]
         input_stream = input_stream[len(preamble):]
-        print("input stream length with zero padding and preamble removed", len(input_stream))
 
     if level >= 3:
         #Input QAM modulated + Encoded Bits + OFDM Symbols
@@ -115,12 +105,9 @@ def WifiReceiver(input_stream, level):
 
         # use FFT to switch to frequency domain
         nsym = int(len(input_stream)/nfft)
-        print("complex symbols count", nsym)
         for i in range(nsym):
             symbol = input_stream[i*nfft:(i+1)*nfft]
             input_stream[i*nfft:(i+1)*nfft] = np.fft.fft(symbol)
-
-        print("input stream length after FFT", len(input_stream))
 
     if level >= 2:
         #Input QAM modulated + Encoded Bits
@@ -130,16 +117,13 @@ def WifiReceiver(input_stream, level):
         mod = comm.modulation.QAMModem(4)
         demod = mod.demodulate(input_stream, demod_type='hard')
 
-        print("input stream length after demodulation", len(demod))
-
+        # preamble is already removed from the stream in level 4
         if level <= 3:
-            # remove the preamble from the stream
             demod = demod[len(preamble):]
 
         # split into encoded length and message
         encoded_length = demod[:2*nfft]
         message = demod[2*nfft:]
-        print("message length", len(message))
 
         # viterbi decode to get interleaved bits (which are handled by level 1)
         decoded_bits = my_hard_vdecoder(message, cc1)
