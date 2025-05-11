@@ -79,6 +79,22 @@ class ContentServer:
 
         print({'neighbors': live_neighbors})
 
+    def add_neighbor(self, uuid, hostname, backend_port, distance_metric):
+        if uuid in self.neighbors:
+            print(f"Neighbor {uuid} already exists")
+            return
+
+        self.neighbors[uuid] = {
+            'name': None,
+            'hostname': hostname,
+            'backend_port': backend_port,
+            'metric': distance_metric,
+            'is_alive': True,
+            'last_seen': time.time()
+        }
+        self.send_keepalive(uuid)
+        self.emit_lsa()
+
     def keepalive_loop(self):
         interval, timeout = 3, 10
         while self.running:
@@ -120,6 +136,17 @@ class ContentServer:
             if uuid in self.neighbors:
                 self.neighbors[uuid]['is_alive'] = True
                 self.neighbors[uuid]['last_seen'] = time.time()
+            else:
+                print(f"Received keepalive from unknown neighbor {uuid}")
+                self.neighbors[uuid] = {
+                    'name': None,
+                    'hostname': addr[0],
+                    'backend_port': addr[1],
+                    'metric': 0,
+                    'is_alive': True,
+                    'last_seen': time.time()
+                }
+                self.emit_lsa()
 
         elif message['type'] == 'lsa':
             # Handle LSA messages here
@@ -147,7 +174,11 @@ def main():
                 server.print_neighbors()
 
             elif command.startswith('addneighbor'):
-                _, uuid, hostname, backend_port, distance_metric = command.split()
+                _, uuid_arg, hostname_arg, backend_port_arg, distance_metric_arg = command.split()
+                uuid = uuid_arg.split('=')[1]
+                hostname = hostname_arg.split('=')[1]
+                backend_port = backend_port_arg.split('=')[1]
+                distance_metric = distance_metric_arg.split('=')[1]
                 server.add_neighbor(uuid, hostname, int(backend_port), int(distance_metric))
 
             elif command == 'map':
