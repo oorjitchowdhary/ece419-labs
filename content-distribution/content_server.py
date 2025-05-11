@@ -43,9 +43,9 @@ class ContentServer:
                     uuid, hostname, backend_port, distance_metric = peer_data
                     self.neighbors[uuid] = {
                         'name': None, # will be found using LSA
-                        'hostname': hostname,
-                        'backend_port': int(backend_port),
-                        'metric': int(distance_metric),
+                        'hostname': hostname.strip(),
+                        'backend_port': int(backend_port.strip()),
+                        'metric': int(distance_metric.strip()),
                         'is_alive': False, # will become True when we receive a keepalive
                         'last_seen': 0
                     }
@@ -73,7 +73,7 @@ class ContentServer:
                 live_neighbors[data['name']] = {
                     'hostname': data['hostname'],
                     'backend_port': data['backend_port'],
-                    'metric': data['distance_metric'],
+                    'metric': data['metric'],
                     'uuid': uuid
                 }
 
@@ -115,14 +115,14 @@ class ContentServer:
         message = {'type': 'keepalive', 'uuid': self.uuid}
         try:
             self.sock.sendto(json.dumps(message).encode(), (self.neighbors[uuid]['hostname'], self.neighbors[uuid]['backend_port']))
-            print(f"Sent keepalive to {uuid}")
+            # print(f"Sent keepalive to {uuid}")
         except Exception as e:
             print(f"Error sending keepalive to {uuid}: {e}")
 
     def receive_loop(self):
         while self.running:
             try:
-                data, addr = self.socket.recvfrom(4096)
+                data, addr = self.sock.recvfrom(4096)
                 message = json.loads(data.decode())
                 self._handle_message(message, addr)
             except Exception as e:
@@ -149,8 +149,57 @@ class ContentServer:
                 self.emit_lsa()
 
         elif message['type'] == 'lsa':
-            # Handle LSA messages here
-            pass
+            uuid, seq = message['uuid'], message['seq']
+            if uuid not in self.neighbors:
+                print(f"Received LSA from unknown neighbor {uuid}")
+                return
+            if seq < self.seq_seen.get(uuid, 0):
+                print(f"Received outdated LSA from {uuid}")
+                return
+
+            self.seq_seen[uuid] = seq
+            self.neighbors[uuid]['name'] = message['name']
+
+            self.network_map[message['name']] = {}
+            for neighbor_uuid, metric in message['neighbors'].items():
+                if neighbor_uuid != self.uuid:
+                    neighbor_name = self.neighbors[neighbor_uuid]['name']
+                    self.network_map[message['name']][neighbor_name] = metric
+
+            self.broadcast(message, exclude=uuid)
+
+    def lsa_loop(self):
+        interval = 5
+        seq = 0
+        while self.running:
+            seq += 1
+            self.emit_lsa(seq)
+            time.sleep(interval)
+
+    def emit_lsa(self, seq=None):
+        if seq is None:
+            seq = self.seq_seen.get(self.uuid, 0) + 1
+        self.seq_seen[self.uuid] = seq
+
+        lsa = {
+            'type': 'lsa',
+            'uuid': self.uuid,
+            'seq': seq,
+            'name': self.name,
+            'neighbors': {u: data['metric'] for u, data in self.neighbors.items() if data['is_alive']},
+        }
+
+        self.broadcast(lsa)
+
+    def broadcast(self, message, exclude=None):
+        for uuid, data in self.neighbors.items():
+            if uuid == exclude:
+                continue
+            try:
+                self.sock.sendto(json.dumps(message).encode(), (data['hostname'], data['backend_port']))
+                # print(f"Broadcasted message to {uuid}")
+            except Exception as e:
+                print(f"Error broadcasting to {uuid}: {e}")
 
 
 def main():
@@ -158,7 +207,7 @@ def main():
     parser.add_argument('-c', '--config', type=str, required=True, help='Path to the configuration file')
     args = parser.parse_args()
 
-    server = ContentServer(args.c)
+    server = ContentServer(args.config)
 
     while True:
         try:
