@@ -4,6 +4,7 @@ import json
 import socket
 import threading
 import time
+import logging
 
 class ContentServer:
     def __init__(self, config_file):
@@ -12,6 +13,7 @@ class ContentServer:
         self.sock = None
         self.running = True
         self.neighbors = {}
+        self.name_map = {}
         self.network_map = {}
         self.seq_seen = {} # highest seq seen for each neighbor
 
@@ -41,42 +43,50 @@ class ContentServer:
                     peer_data = line.split('=')[1].strip().split(',')
                     uuid, host, backend_port, metric = peer_data
                     self.neighbors[uuid] = {
-                        'name': None, # will be found using LSA
                         'host': host.strip(),
                         'backend_port': int(backend_port.strip()),
                         'metric': int(metric.strip()),
-                        'is_alive': False, # will become True when we receive a keepalive
+                        'is_alive': True, # assume alive at start
                         'last_seen': 0
                     }
 
+            # add yourself to global network map
+            self.network_map[self.uuid] = {
+                uuid: data['metric'] for uuid, data in self.neighbors.items() if data['is_alive']
+            }
+            self.name_map[self.uuid] = self.name
+            self.seq_seen[self.uuid] = 0
+
+            logging.info(f"Loaded config: {self.name}, {self.uuid}, {self.backend_port}")
+
         except Exception as e:
-            # print(f"Error loading config file: {e}")
+            logging.error(f"Error loading config file: {e}")
             sys.exit(1)
 
     def _setup_socket(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(('', self.backend_port))
-            # print(f"Listening on {self.name}:{self.backend_port}")
+            logging.info(f"Listening on port {self.backend_port}")
         except Exception as e:
-            # print(f"Error setting up socket: {e}")
+            logging.error(f"Error setting up socket: {e}")
             sys.exit(1)
 
     def print_uuid(self):
-        print({'uuid': self.uuid})
+        print(json.dumps({'uuid': self.uuid}))
 
     def print_neighbors(self):
-        live_neighbors = {}
+        alive_neighbors = {}
         for uuid, data in self.neighbors.items():
             if data.get('is_alive', False):
-                live_neighbors[data['name']] = {
+                alive_neighbors[self.name_map.get(uuid, uuid)] = {
                     'uuid': uuid,
                     'host': data['host'],
                     'backend_port': data['backend_port'],
                     'metric': data['metric']
                 }
 
-        print({'neighbors': live_neighbors})
+        print(json.dumps({'neighbors': alive_neighbors}))
 
     def add_neighbor(self, uuid, host, backend_port, metric):
         if uuid in self.neighbors:
@@ -92,32 +102,30 @@ class ContentServer:
             'last_seen': time.time()
         }
         self.send_keepalive(uuid)
-        self.emit_lsa()
+        self.send_lsa()
 
     def keepalive_loop(self):
-        interval, timeout = 3, 10
+        interval, timeout = 3, 9
         while self.running:
             now = time.time()
             for uuid, data in self.neighbors.items():
-                self.send_keepalive(uuid)
-                if data['is_alive'] and (now - data['last_seen'] > timeout):
-                    # print(f"Neighbor {uuid} is dead")
-                    data['is_alive'] = False
-                    self.emit_lsa()
+                if data['is_alive']:
+                    self.send_keepalive(uuid)
+
+                    if now - data['last_seen'] > timeout:
+                        logging.warning(f"Neighbor {uuid} is not responding, marking as dead")
+                        data['is_alive'] = False
+                        self.send_lsa()
+
             time.sleep(interval)
 
-    def send_keepalive(self, uuid):
-        if uuid not in self.neighbors:
-            # print(f"Neighbor {uuid} not found")
-            return
-
-        message = {'type': 'keepalive', 'uuid': self.uuid}
-        try:
-            self.sock.sendto(json.dumps(message).encode(), (self.neighbors[uuid]['host'], self.neighbors[uuid]['backend_port']))
-            # print(f"Sent keepalive to {uuid}")
-        except Exception as e:
-            pass
-            # print(f"Error sending keepalive to {uuid}: {e}")
+    def lsa_loop(self):
+        interval = 5
+        seq = 0
+        while self.running:
+            seq += 1
+            self.send_lsa(seq)
+            time.sleep(interval)
 
     def receive_loop(self):
         while self.running:
@@ -126,7 +134,7 @@ class ContentServer:
                 message = json.loads(data.decode())
                 self._handle_message(message, addr)
             except Exception as e:
-                # print(f"Error receiving message: {e}")
+                logging.error(f"Error receiving message: {e}")
                 continue
             time.sleep(0.1)
 
@@ -136,47 +144,45 @@ class ContentServer:
             if uuid in self.neighbors:
                 self.neighbors[uuid]['is_alive'] = True
                 self.neighbors[uuid]['last_seen'] = time.time()
-            else:
-                # print(f"Received keepalive from unknown neighbor {uuid}")
-                self.neighbors[uuid] = {
-                    'name': None,
-                    'host': addr[0],
-                    'backend_port': addr[1],
-                    'metric': 30,
-                    'is_alive': True,
-                    'last_seen': time.time()
-                }
-                self.emit_lsa()
 
         elif message['type'] == 'lsa':
-            uuid, seq = message['uuid'], message['seq']
-            if uuid not in self.neighbors:
-                # print(f"Received LSA from unknown neighbor {uuid}")
+            origin_uuid = message['uuid']
+            origin_seq = message['seq']
+            origin_name = message['name']
+            neighbor_info = message['neighbors']
+
+            # ignore outdated LSAs
+            if origin_seq <= self.seq_seen.get(origin_uuid, -1):
+                logging.info(f"Received outdated LSA from {origin_uuid} with seq {origin_seq}, ignoring")
                 return
-            if seq < self.seq_seen.get(uuid, 0):
-                # print(f"Received outdated LSA from {uuid}")
-                return
 
-            self.seq_seen[uuid] = seq
-            self.neighbors[uuid]['name'] = message['name']
+            # update seq number and global map states
+            self.seq_seen[origin_uuid] = origin_seq
+            self.name_map[origin_uuid] = origin_name
+            self.network_map[origin_uuid] = neighbor_info
 
-            self.network_map[message['name']] = {}
-            for neighbor_uuid, metric in message['neighbors'].items():
-                if neighbor_uuid != self.uuid:
-                    neighbor_name = self.neighbors[neighbor_uuid]['name']
-                    self.network_map[message['name']][neighbor_name] = metric
+            # determine sender to not forward back
+            sender_uuid = None
+            for uuid, data in self.neighbors.items():
+                if data['host'] == addr[0] and data['backend_port'] == addr[1]:
+                    sender_uuid = uuid
+                    break
 
-            self.broadcast(message, exclude=uuid)
+            # broadcast the LSA to all neighbors
+            self.broadcast(message, exclude=sender_uuid)
 
-    def lsa_loop(self):
-        interval = 5
-        seq = 0
-        while self.running:
-            seq += 1
-            self.emit_lsa(seq)
-            time.sleep(interval)
+    def send_keepalive(self, uuid):
+        if uuid not in self.neighbors:
+            logging.error(f"Neighbor {uuid} not found while sending keepalive")
+            return
 
-    def emit_lsa(self, seq=None):
+        message = {'type': 'keepalive', 'uuid': self.uuid, 'name': self.name}
+        try:
+            self.sock.sendto(json.dumps(message).encode(), (self.neighbors[uuid]['host'], self.neighbors[uuid]['backend_port']))
+        except Exception as e:
+            logging.error(f"Error sending keepalive to {uuid}: {e}")
+
+    def send_lsa(self, seq=None):
         if seq is None:
             seq = self.seq_seen.get(self.uuid, 0) + 1
         self.seq_seen[self.uuid] = seq
@@ -197,10 +203,9 @@ class ContentServer:
                 continue
             try:
                 self.sock.sendto(json.dumps(message).encode(), (data['host'], data['backend_port']))
-                # print(f"Broadcasted message to {uuid}")
+                logging.info(f"Broadcasted message to {uuid}")
             except Exception as e:
-                pass
-                # print(f"Error broadcasting to {uuid}: {e}")
+                logging.error(f"Error broadcasting message to {uuid}: {e}")
 
     def print_map(self):
         print({'map': self.network_map})
@@ -261,8 +266,7 @@ def main():
                 server.kill()
 
         except Exception as e:
-            pass
-            # print(f"Error in main loop: {e}")
+            logging.error(f"Error processing command: {e}")
 
 if __name__ == "__main__":
     main()
