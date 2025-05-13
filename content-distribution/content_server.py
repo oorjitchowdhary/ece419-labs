@@ -5,7 +5,6 @@ import socket
 import threading
 import time
 
-
 class ContentServer:
     def __init__(self, config_file):
         self.config_file = config_file
@@ -40,27 +39,27 @@ class ContentServer:
                 for _ in range(peer_count):
                     line = f.readline().strip()
                     peer_data = line.split('=')[1].strip().split(',')
-                    uuid, hostname, backend_port, distance_metric = peer_data
+                    uuid, host, backend_port, metric = peer_data
                     self.neighbors[uuid] = {
                         'name': None, # will be found using LSA
-                        'hostname': hostname.strip(),
+                        'host': host.strip(),
                         'backend_port': int(backend_port.strip()),
-                        'metric': int(distance_metric.strip()),
+                        'metric': int(metric.strip()),
                         'is_alive': False, # will become True when we receive a keepalive
                         'last_seen': 0
                     }
 
         except Exception as e:
-            print(f"Error loading config file: {e}")
+            # print(f"Error loading config file: {e}")
             sys.exit(1)
 
     def _setup_socket(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(('', self.backend_port))
-            print(f"Listening on {self.name}:{self.backend_port}")
+            # print(f"Listening on {self.name}:{self.backend_port}")
         except Exception as e:
-            print(f"Error setting up socket: {e}")
+            # print(f"Error setting up socket: {e}")
             sys.exit(1)
 
     def print_uuid(self):
@@ -71,24 +70,24 @@ class ContentServer:
         for uuid, data in self.neighbors.items():
             if data.get('is_alive', False):
                 live_neighbors[data['name']] = {
-                    'hostname': data['hostname'],
+                    'uuid': uuid,
+                    'host': data['host'],
                     'backend_port': data['backend_port'],
-                    'metric': data['metric'],
-                    'uuid': uuid
+                    'metric': data['metric']
                 }
 
         print({'neighbors': live_neighbors})
 
-    def add_neighbor(self, uuid, hostname, backend_port, distance_metric):
+    def add_neighbor(self, uuid, host, backend_port, metric):
         if uuid in self.neighbors:
             print(f"Neighbor {uuid} already exists")
             return
 
         self.neighbors[uuid] = {
             'name': None,
-            'hostname': hostname,
+            'host': host,
             'backend_port': backend_port,
-            'metric': distance_metric,
+            'metric': metric,
             'is_alive': True,
             'last_seen': time.time()
         }
@@ -102,22 +101,23 @@ class ContentServer:
             for uuid, data in self.neighbors.items():
                 self.send_keepalive(uuid)
                 if data['is_alive'] and (now - data['last_seen'] > timeout):
-                    print(f"Neighbor {uuid} is dead")
+                    # print(f"Neighbor {uuid} is dead")
                     data['is_alive'] = False
-                    self.send_lsa()
+                    self.emit_lsa()
             time.sleep(interval)
 
     def send_keepalive(self, uuid):
         if uuid not in self.neighbors:
-            print(f"Neighbor {uuid} not found")
+            # print(f"Neighbor {uuid} not found")
             return
 
         message = {'type': 'keepalive', 'uuid': self.uuid}
         try:
-            self.sock.sendto(json.dumps(message).encode(), (self.neighbors[uuid]['hostname'], self.neighbors[uuid]['backend_port']))
+            self.sock.sendto(json.dumps(message).encode(), (self.neighbors[uuid]['host'], self.neighbors[uuid]['backend_port']))
             # print(f"Sent keepalive to {uuid}")
         except Exception as e:
-            print(f"Error sending keepalive to {uuid}: {e}")
+            pass
+            # print(f"Error sending keepalive to {uuid}: {e}")
 
     def receive_loop(self):
         while self.running:
@@ -126,7 +126,7 @@ class ContentServer:
                 message = json.loads(data.decode())
                 self._handle_message(message, addr)
             except Exception as e:
-                print(f"Error receiving message: {e}")
+                # print(f"Error receiving message: {e}")
                 continue
             time.sleep(0.1)
 
@@ -137,12 +137,12 @@ class ContentServer:
                 self.neighbors[uuid]['is_alive'] = True
                 self.neighbors[uuid]['last_seen'] = time.time()
             else:
-                print(f"Received keepalive from unknown neighbor {uuid}")
+                # print(f"Received keepalive from unknown neighbor {uuid}")
                 self.neighbors[uuid] = {
                     'name': None,
-                    'hostname': addr[0],
+                    'host': addr[0],
                     'backend_port': addr[1],
-                    'metric': 0,
+                    'metric': 30,
                     'is_alive': True,
                     'last_seen': time.time()
                 }
@@ -151,10 +151,10 @@ class ContentServer:
         elif message['type'] == 'lsa':
             uuid, seq = message['uuid'], message['seq']
             if uuid not in self.neighbors:
-                print(f"Received LSA from unknown neighbor {uuid}")
+                # print(f"Received LSA from unknown neighbor {uuid}")
                 return
             if seq < self.seq_seen.get(uuid, 0):
-                print(f"Received outdated LSA from {uuid}")
+                # print(f"Received outdated LSA from {uuid}")
                 return
 
             self.seq_seen[uuid] = seq
@@ -196,10 +196,19 @@ class ContentServer:
             if uuid == exclude:
                 continue
             try:
-                self.sock.sendto(json.dumps(message).encode(), (data['hostname'], data['backend_port']))
+                self.sock.sendto(json.dumps(message).encode(), (data['host'], data['backend_port']))
                 # print(f"Broadcasted message to {uuid}")
             except Exception as e:
-                print(f"Error broadcasting to {uuid}: {e}")
+                pass
+                # print(f"Error broadcasting to {uuid}: {e}")
+
+    def print_map(self):
+        print({'map': self.network_map})
+
+    def kill(self):
+        self.running = False
+        self.sock.close()
+        sys.exit(0)
 
 
 def main():
@@ -223,12 +232,24 @@ def main():
                 server.print_neighbors()
 
             elif command.startswith('addneighbor'):
-                _, uuid_arg, hostname_arg, backend_port_arg, distance_metric_arg = command.split()
-                uuid = uuid_arg.split('=')[1]
-                hostname = hostname_arg.split('=')[1]
-                backend_port = backend_port_arg.split('=')[1]
-                distance_metric = distance_metric_arg.split('=')[1]
-                server.add_neighbor(uuid, hostname, int(backend_port), int(distance_metric))
+                while ' =' in command:
+                    command = command.replace(' =', '=')
+                while '= ' in command:
+                    command = command.replace('= ', '=')
+
+                tokens = command.split()
+                args = {}
+                for token in tokens[1:]:
+                    key, value = token.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    args[key] = value
+
+                uuid = args.get('uuid')
+                host = args.get('host')
+                backend_port = int(args.get('backend_port'))
+                metric = int(args.get('metric'))
+                server.add_neighbor(uuid, host, backend_port, metric)
 
             elif command == 'map':
                 server.print_map()
@@ -236,14 +257,12 @@ def main():
             elif command == 'rank':
                 server.print_rank()
 
-            elif command == 'kill':
+            else:
                 server.kill()
 
-            else:
-                print(f"Unknown command: {command}")
-
         except Exception as e:
-            print(f"Error in main loop: {e}")
+            pass
+            # print(f"Error in main loop: {e}")
 
 if __name__ == "__main__":
     main()
