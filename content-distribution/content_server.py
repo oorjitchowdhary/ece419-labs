@@ -57,19 +57,19 @@ class ContentServer:
             self.name_map[self.uuid] = self.name
             self.seq_seen[self.uuid] = 0
 
-            logging.info(f"Loaded config: {self.name}, {self.uuid}, {self.backend_port}")
+            # logging.info(f"Loaded config: {self.name}, {self.uuid}, {self.backend_port}")
 
         except Exception as e:
-            logging.error(f"Error loading config file: {e}")
+            # logging.error(f"Error loading config file: {e}")
             sys.exit(1)
 
     def _setup_socket(self):
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(('', self.backend_port))
-            logging.info(f"Listening on port {self.backend_port}")
+            # logging.info(f"Listening on port {self.backend_port}")
         except Exception as e:
-            logging.error(f"Error setting up socket: {e}")
+            # logging.error(f"Error setting up socket: {e}")
             sys.exit(1)
 
     def print_uuid(self):
@@ -90,7 +90,7 @@ class ContentServer:
 
     def add_neighbor(self, uuid, host, backend_port, metric):
         if uuid in self.neighbors:
-            print(f"Neighbor {uuid} already exists")
+            # logging.error(f"Neighbor {uuid} already exists")
             return
 
         self.neighbors[uuid] = {
@@ -113,7 +113,7 @@ class ContentServer:
                     self.send_keepalive(uuid)
 
                     if now - data['last_seen'] > timeout:
-                        logging.warning(f"Neighbor {uuid} is not responding, marking as dead")
+                        # logging.warning(f"Neighbor {uuid} is not responding, marking as dead")
                         data['is_alive'] = False
                         self.send_lsa()
 
@@ -134,7 +134,7 @@ class ContentServer:
                 message = json.loads(data.decode())
                 self._handle_message(message, addr)
             except Exception as e:
-                logging.error(f"Error receiving message: {e}")
+                # logging.error(f"Error receiving message: {e}")
                 continue
             time.sleep(0.1)
 
@@ -153,7 +153,7 @@ class ContentServer:
 
             # ignore outdated LSAs
             if origin_seq <= self.seq_seen.get(origin_uuid, -1):
-                logging.info(f"Received outdated LSA from {origin_uuid} with seq {origin_seq}, ignoring")
+                # logging.info(f"Received outdated LSA from {origin_uuid} with seq {origin_seq}, ignoring")
                 return
 
             # update seq number and global map states
@@ -173,14 +173,15 @@ class ContentServer:
 
     def send_keepalive(self, uuid):
         if uuid not in self.neighbors:
-            logging.error(f"Neighbor {uuid} not found while sending keepalive")
+            # logging.error(f"Neighbor {uuid} not found while sending keepalive")
             return
 
         message = {'type': 'keepalive', 'uuid': self.uuid, 'name': self.name}
         try:
             self.sock.sendto(json.dumps(message).encode(), (self.neighbors[uuid]['host'], self.neighbors[uuid]['backend_port']))
         except Exception as e:
-            logging.error(f"Error sending keepalive to {uuid}: {e}")
+            pass
+            # logging.error(f"Error sending keepalive to {uuid}: {e}")
 
     def send_lsa(self, seq=None):
         if seq is None:
@@ -203,12 +204,45 @@ class ContentServer:
                 continue
             try:
                 self.sock.sendto(json.dumps(message).encode(), (data['host'], data['backend_port']))
-                logging.info(f"Broadcasted message to {uuid}")
+                # logging.info(f"Broadcasted message to {uuid}")
             except Exception as e:
-                logging.error(f"Error broadcasting message to {uuid}: {e}")
+                pass
+                # logging.error(f"Error broadcasting message to {uuid}: {e}")
+
+    def dijkstra(self, start):
+        path = {}
+        nodes = set(self.network_map.keys())
+        distances = {node: float('inf') for node in nodes}
+        distances[start] = 0
+
+        while nodes:
+            min_node = None
+            for node in nodes:
+                if min_node is None or distances[node] < distances[min_node]:
+                    min_node = node
+
+            if distances[min_node] == float('inf'):
+                break  # Remaining nodes are unreachable
+
+            nodes.remove(min_node)
+
+            for neighbor, weight in self.network_map.get(min_node, {}).items():
+                alt = distances[min_node] + weight
+                if alt < distances.get(neighbor, float('inf')):
+                    distances[neighbor] = alt
+                    path[neighbor] = min_node
+
+        return distances, path
 
     def print_map(self):
         print({'map': self.network_map})
+
+    def print_rank(self):
+        distances, _ = self.dijkstra(self.uuid)
+        ranked = {
+            self.name_map.get(uuid, uuid): cost for uuid, cost in distances.items() if uuid != self.uuid
+        }
+        print(json.dumps({'rank': ranked}))
 
     def kill(self):
         self.running = False
@@ -266,7 +300,8 @@ def main():
                 server.kill()
 
         except Exception as e:
-            logging.error(f"Error processing command: {e}")
+            pass
+            # logging.error(f"Error processing command: {e}")
 
 if __name__ == "__main__":
     main()
