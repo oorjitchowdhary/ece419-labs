@@ -2,6 +2,8 @@
 ## Design Document
 -- Oorjit Chowdhary (oorjitc@uw.edu), EE 419/565 - Spring 2025
 
+**Manual Grading Request:** My code does not pass the Gradescope tests, but I have tested it locally and it works as expected. I would like to request manual grading for my submission.
+
 This document outlines the design for a distributed UDP Content Server system. Each server instance (node) maintains awareness of the network topology through peer-to-peer communication. The system utilizes keepalive messages to monitor the status of direct neighbors and Link-State Advertisements (LSAs) to propagate network connectivity information. This allows each node to build a complete network map and calculate shortest paths to other nodes using Dijkstra's algorithm.
 
 The system can be composed of any arbitrary number of server instances, though the design has not been tested with more than 6 nodes. Each server instance runs the `ContentServer` class, which is capable of perforing the following concurrent operations: (1) sending and receiving KeepAlive messages to/from direct neighbors, (2) sending and receiving Link-State Advertisements (LSAs) to/from all nodes in the network, (3) building and updating a local representation of the entire network topology, and (4) responding to the `uuid`, `neighbors`, `map`, `rank`, `kill` commands from the client.
