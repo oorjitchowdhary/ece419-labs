@@ -50,7 +50,7 @@ class ContentServer:
                         'last_seen': 0
                     }
 
-            # add yourself to global network map
+            # add node to global network map
             self.network_map[self.uuid] = {
                 uuid: data['metric'] for uuid, data in self.neighbors.items() if data['is_alive']
             }
@@ -114,7 +114,20 @@ class ContentServer:
 
                     if now - data['last_seen'] > timeout:
                         # logging.warning(f"Neighbor {uuid} is not responding, marking as dead")
+                        # mark neighbor as dead
                         data['is_alive'] = False
+
+                        # update local network map
+                        # remove dead node from neighbors in global network map
+                        for neighbor_uuid, neighbor_data in self.network_map.items():
+                            if uuid in neighbor_data:
+                                del neighbor_data[uuid]
+
+                        # remove dead node from global network map
+                        if uuid in self.network_map:
+                            del self.network_map[uuid]
+
+                        # send LSA to update neighbors
                         self.send_lsa()
 
             time.sleep(interval)
@@ -144,6 +157,9 @@ class ContentServer:
             if uuid in self.neighbors:
                 self.neighbors[uuid]['is_alive'] = True
                 self.neighbors[uuid]['last_seen'] = time.time()
+
+            if uuid not in self.name_map:
+                self.name_map[uuid] = message['name']
 
         elif message['type'] == 'lsa':
             origin_uuid = message['uuid']
@@ -188,12 +204,17 @@ class ContentServer:
             seq = self.seq_seen.get(self.uuid, 0) + 1
         self.seq_seen[self.uuid] = seq
 
+        alive_neighbors = {u: data['metric'] for u, data in self.neighbors.items() if data['is_alive']}
+
+        # update node's global network map with alive neighbors
+        self.network_map[self.uuid] = alive_neighbors
+
         lsa = {
             'type': 'lsa',
             'uuid': self.uuid,
             'seq': seq,
             'name': self.name,
-            'neighbors': {u: data['metric'] for u, data in self.neighbors.items() if data['is_alive']},
+            'neighbors': alive_neighbors,
         }
 
         self.broadcast(lsa)
