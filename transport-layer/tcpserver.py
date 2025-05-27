@@ -23,8 +23,7 @@ class Server():
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) #NOTE THAT THE SOCK_DGRAM will ensure your socket is UDP
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind(("", self.port)) #This is the only port you can use to receive
-        
-        self.server_socket.settimeout(1)   # timeout value
+        self.server_socket.settimeout(1) # timeout value
 
         self.remain_threads = True
         self.cli()
@@ -71,39 +70,92 @@ class Server():
         # transmission complete, close socket
 
         # write the file
-        
+
+
     def read_file(self, file_name):
-        #You can write a function that takes the file to be transmitted and converts into chunks of packet_size
-        return transmit_file
+        # read the file and return a list of packets of size PKTSIZE
+        packets = []
+        with open(file_name, 'rb') as f:
+            while True:
+                chunk = f.read(PKTSIZE)
+                if not chunk:
+                    break
+                packets.append(chunk)
+        return packets
 
     def transmit(self, file_name, addr):
         # create a udp socket for transmission
-        # divide the file into several parts
-        #transmit_file = self.read_file(file_name)
-        #packet_num = len(transmit_file)
-        # use socket to send packet number to the receiver
-        #ack = 0
-        #print("sending packet num", packet_num, "to", addr)
-        tx_socket.sendto(str(packet_num).encode(), addr)
-        try:
-            #Receive ACK from the same tx_socket and increment window
-        except socket.timeout:
-            pass
-        # use a transmit window to determine which file should be transmitted
+        tx_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx_socket.settimeout(TIMEOUT)  # set timeout for the socket
 
-        # use a time-out array to record which file is time-out and need to be transmitted again
-        # -1 indicates received, 0 indicates not transmitted, positive numbers means the time of transmission
-        
+        # divide the file into several parts
+        transmit_file = self.read_file(file_name)
+        packet_num = len(transmit_file)
+
+        # use socket to send packet number to the receiver
+        print("sending packet num", packet_num, "to", addr)
+        tx_socket.sendto(str(packet_num).encode(), addr)
+
+        # use a transmit window to determine which file should be transmitted
+        base = 0
+        next_seq = 0
+        timeout_status = [0] * packet_num # -1 = ACKed, 0 = not sent, >0 = last sent time
+        acked = [False] * packet_num  # to keep track of which packets have been acknowledged
+        lock = threading.Lock()  # lock for thread safety
+
         def transmit_thread():
             #Takes the transmit window and transmits every packet that is allowed to be transmitted
-            return
-        
+            nonlocal base, next_seq, timeout_status, acked
+            while base < packet_num:
+                with lock:
+                    while next_seq < base + WINDOW_SIZE and next_seq < packet_num:
+                        if timeout_status[next_seq] == 0:
+                            packet = transmit_file[next_seq]
+                            packet_index = next_seq.to_bytes(IDX_LENGTH, 'big')
+                            tx_socket.sendto(packet_index + packet, addr)
+                            timeout_status[next_seq] = time.time()  # record the time of sending
+                        next_seq += 1
+
+                    # check for timeouts and resend packets if necessary
+                    for i in range(base, min(base + WINDOW_SIZE, packet_num)):
+                        if timeout_status[i] > 0 and time.time() - timeout_status[i] > TIMEOUT:
+                            # resend the packet if it has timed out
+                            packet = transmit_file[i]
+                            packet_index = i.to_bytes(IDX_LENGTH, 'big')
+                            tx_socket.sendto(packet_index + packet, addr)
+                            timeout_status[i] = time.time()
+
+                time.sleep(0.1)  # sleep to avoid busy waiting
+
         def ack_thread():
             #Receives acknowledgement and updates the transmit window with sendable packets
-        
-        #Create TX and RX threads and start doing it
+            nonlocal base, next_seq, timeout_status, acked
+            while base < packet_num:
+                try:
+                    ack_data, _ = tx_socket.recvfrom(BUFSIZE)
+                    ack_idx = int.from_bytes(ack_data[:IDX_LENGTH], 'big')
+                    with lock:
+                        if not acked[ack_idx]:
+                            acked[ack_idx] = True
+                            timeout_status[ack_idx] = -1
+                            if ack_idx == base:
+                                # move the base forward if the ACK is for the base packet
+                                while base < packet_num and acked[base]:
+                                    base += 1
+                                next_seq = max(next_seq, base)
+                except socket.timeout:
+                    continue
 
-        #When done transmitting, close the threads.
+        #Create TX and RX threads and start doing it
+        tx = threading.Thread(target=transmit_thread)
+        ack = threading.Thread(target=ack_thread)
+        tx.start()
+        ack.start()
+        tx.join()
+        ack.join()
+
+        # When done transmitting, close the threads.
+        tx_socket.close()
 
     def listener(self): # listen to the socket to see if there's any transmission request
         while self.remain_threads:
