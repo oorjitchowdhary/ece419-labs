@@ -4,12 +4,14 @@ import time
 import threading
 import uuid
 
+# I ran into OSErrors on macOS with larger buffer sizes, so I reduced it
+# BUFSIZE = 10202  # size of receiving buffer
+# PKTSIZE = 10200  # number of bytes in a packet
+
 IDX_LENGTH = 2 # 2 bytes of packet index
 HEADER_SIZE = 1 + 16 + IDX_LENGTH  # 1 byte for packet type, 16 bytes for session ID, 2 bytes for packet index
 PKTSIZE = 8190
 BUFSIZE = PKTSIZE + HEADER_SIZE  # buffer size for receiving packets, including header
-# BUFSIZE = 10202  # size of receiving buffer
-# PKTSIZE = 10200  # number of bytes in a packet
 WINDOW_SIZE = 16
 TIMEOUT = 0.5   # timeout time
 
@@ -90,16 +92,27 @@ class Server():
             "received": [],  # to keep track of received packets
             "lock": threading.Lock(),  # lock for thread safety
             "complete": False,  # set to True when all packets are received
+            "syn_ack_received": False,  # flag to check if SYN-ACK is received
+            "syn_last_sent": 0,  # last time SYN was sent
         }
 
         # send SYN packet
-        syn_packet = bytearray()
-        syn_packet.append(0x00)  # SYN packet type
-        syn_packet.extend(session_id)  # append session ID
-        syn_packet.append(len(filename_bytes))  # append length of filename
-        syn_packet.extend(filename_bytes)  # append filename
-        self.server_socket.sendto(syn_packet, addr)
-        print(f"[DEBUG] Sent SYN to {addr} for file '{file_name}' with session ID {session_id.hex()}")
+        def syn_transmit():
+            while not self.sessions[session_id]["syn_ack_received"]:
+                now = time.time()
+                if now - self.sessions[session_id]["syn_last_sent"] > TIMEOUT:
+                    syn_packet = bytearray()
+                    syn_packet.append(0x00)  # SYN packet type
+                    syn_packet.extend(session_id)  # append session ID
+                    syn_packet.append(len(filename_bytes))  # append length of filename
+                    syn_packet.extend(filename_bytes)  # append filename
+                    self.server_socket.sendto(syn_packet, addr)
+                    self.sessions[session_id]["syn_last_sent"] = now  # update last sent time
+                    print(f"[DEBUG] Sent SYN to {addr} for file '{file_name}' with session ID {session_id.hex()}")
+                time.sleep(0.1)  # sleep to avoid busy waiting
+
+        # start a thread to send SYN packets until SYN-ACK is received
+        threading.Thread(target=syn_transmit).start()
 
 
     def transmit(self, file_name, addr, session_id):
@@ -171,16 +184,27 @@ class Server():
             "timeout_status": [0] * total_packets,  # -1 = ACKed, 0 = not sent, >0 = last sent time
             "acked": [False] * total_packets,  # to keep track of which packets have been acknowledged
             "lock": threading.Lock(),  # lock for thread safety
-            "ready": False  # set to True after ACK
+            "ready": False,  # set to True after ACK
+            "ack_received": False,  # flag to check if ACK is received
+            "syn_ack_last_sent": 0,  # last time SYN-ACK was sent
         }
 
         # send SYN-ACK response
-        response = bytearray()
-        response.append(0x01)  # SYN-ACK packet type
-        response.extend(session_id)  # append session ID
-        response.extend(total_packets.to_bytes(2, 'big'))  # append total packets count
-        self.server_socket.sendto(response, addr)
-        print(f"[DEBUG] Sent SYN-ACK to {addr} for session ID {session_id.hex()}")
+        def syn_ack_transmit():
+            while not self.sessions[session_id]["ack_received"]:
+                now = time.time()
+                if now - self.sessions[session_id]["syn_ack_last_sent"] > TIMEOUT:
+                    syn_ack_packet = bytearray()
+                    syn_ack_packet.append(0x01)
+                    syn_ack_packet.extend(session_id)  # append session ID
+                    syn_ack_packet.extend(total_packets.to_bytes(2, 'big'))  # append total packets count
+                    self.server_socket.sendto(syn_ack_packet, addr)
+                    self.sessions[session_id]["syn_ack_last_sent"] = now  # update last sent time
+                    print(f"[DEBUG] Sent SYN-ACK to {addr} for session ID {session_id.hex()} with total packets {total_packets}")
+                time.sleep(0.1)  # sleep to avoid busy waiting
+
+        # start a thread to send SYN-ACK packets until ACK is received
+        threading.Thread(target=syn_ack_transmit).start()
 
 
     def handle_syn_ack(self, packet, addr):
@@ -194,6 +218,7 @@ class Server():
             session = self.sessions[session_id]
             session["total_packets"] = total_packets
             session["received"] = [None] * total_packets
+            session["syn_ack_received"] = True  # mark SYN-ACK as received
 
         # send ACK response
         response = bytearray()
@@ -212,6 +237,7 @@ class Server():
             return
 
         session = self.sessions[session_id]
+        session["ack_received"] = True  # mark ACK as received
 
         # check if sender side and mark as ready
         if "ready" in session:
@@ -319,10 +345,6 @@ class Server():
                     self.handle_data(packet[1:], addr)
                 elif pkt_type == 0x04: # DATA-ACK packet (received by server)
                     self.handle_data_ack(packet[1:], addr)
-                elif pkt_type == 0x05: # FIN packet
-                    self.handle_fin(packet[1:], addr)
-                elif pkt_type == 0x06: # FIN-ACK packet
-                    self.handle_fin_ack(packet[1:], addr)
                 else:
                     print(f"[DEBUG] Unknown packet type {pkt_type} received from {addr}")
 
