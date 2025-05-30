@@ -4,12 +4,13 @@ import time
 import threading
 import uuid
 
-BUFSIZE = 7402
-PKTSIZE = 7400
+IDX_LENGTH = 2 # 2 bytes of packet index
+HEADER_SIZE = 1 + 16 + IDX_LENGTH  # 1 byte for packet type, 16 bytes for session ID, 2 bytes for packet index
+PKTSIZE = 8190
+BUFSIZE = PKTSIZE + HEADER_SIZE  # buffer size for receiving packets, including header
 # BUFSIZE = 10202  # size of receiving buffer
 # PKTSIZE = 10200  # number of bytes in a packet
 WINDOW_SIZE = 16
-IDX_LENGTH = 2 # 2 bytes of packet index
 TIMEOUT = 0.5   # timeout time
 
 class Server():
@@ -84,6 +85,7 @@ class Server():
         # create session entry (receiver side)
         self.sessions[session_id] = {
             "addr": addr,
+            "filename": file_name,
             "total_packets": 0,  # will be set after receiving SYN-ACK
             "received": [],  # to keep track of received packets
             "lock": threading.Lock(),  # lock for thread safety
@@ -102,7 +104,51 @@ class Server():
 
     def transmit(self, file_name, addr, session_id):
         print(f"[DEBUG] Starting transmission to {addr} for file {file_name}")
-        tx_socket = self.server_socket  # reuse the server socket for transmission
+
+        session = self.sessions[session_id]
+        packets = self.read_file(file_name)  # read the file and get packets
+
+        print(f"[DEBUG] Total packets to transmit: {len(packets)}")
+
+        while session["base"] < session["total_packets"]:
+            with session["lock"]:
+                # send packets in the window
+                while session["next_seq"] < session["base"] + WINDOW_SIZE and session["next_seq"] < session["total_packets"]:
+                    if session["timeout_status"][session["next_seq"]] == 0:
+                        data_packet = bytearray()
+                        data_packet.append(0x03)  # Data packet type
+                        data_packet.extend(session_id)  # append session ID
+
+                        packet_index = session["next_seq"].to_bytes(IDX_LENGTH, 'big')
+                        data_packet.extend(packet_index)  # append packet index
+                        data_packet.extend(packets[session["next_seq"]])  # append packet data
+                        self.server_socket.sendto(data_packet, addr)
+                        session["timeout_status"][session["next_seq"]] = time.time()  # record the time of sending
+                        print(f'[DEBUG] Sent packet {session["next_seq"] + 1}/{session["total_packets"]} to {addr}')
+
+                    session["next_seq"] += 1
+
+                # check for timeouts and resend packets if necessary
+                for i in range(session["base"], min(session["base"] + WINDOW_SIZE, session["total_packets"])):
+                    if not session["acked"][i] and session["timeout_status"][i] > 0 and time.time() - session["timeout_status"][i] > TIMEOUT:
+                        # resend the packet if it has timed out
+                        data_packet = bytearray()
+                        data_packet.append(0x03)
+                        data_packet.extend(session_id)  # append session ID
+
+                        packet_index = i.to_bytes(IDX_LENGTH, 'big')
+                        data_packet.extend(packet_index)  # append packet index
+                        data_packet.extend(packets[i])  # append packet data
+                        self.server_socket.sendto(data_packet, addr)
+                        session["timeout_status"][i] = time.time()  # update the timeout status
+                        print(f'[DEBUG] Resent packet {i + 1}/{session["total_packets"]} to {addr} due to timeout')
+
+                while session["base"] < session["total_packets"] and session["acked"][session["base"]]:
+                    # move the base forward if the ACK is for the base packet
+                    session["base"] += 1
+                    print(f'[DEBUG] Base moved to {session["base"]} for session ID {session_id.hex()}')
+
+            time.sleep(0.1)  # sleep to avoid busy waiting
 
 
     def handle_syn(self, packet, addr):
@@ -177,6 +223,81 @@ class Server():
         print(f"[DEBUG] Transmission thread started for session ID {session_id.hex()}")
 
 
+    def handle_data(self, packet, addr):
+        session_id = packet[:16]
+        packet_index = int.from_bytes(packet[16:18], 'big')  # next 2 bytes are the packet index
+        packet_data = packet[18:]  # the rest is the packet data
+
+        print(f"[DEBUG] Received DATA from {addr} for session ID {session_id.hex()} and packet index {packet_index}")
+
+        if session_id not in self.sessions:
+            print(f"[DEBUG] Session ID {session_id.hex()} not found in sessions.")
+            return
+
+        session = self.sessions[session_id]
+        with session["lock"]:
+            if packet_index < len(session["received"]):
+                if not session["received"][packet_index]:
+                    session["received"][packet_index] = packet_data
+                    print(f"[DEBUG] Packet {packet_index} received for session ID {session_id.hex()}")
+
+                    # check if all packets are received
+                    if all(packet is not None for packet in session["received"]):
+                        session["complete"] = True
+                        print(f"[DEBUG] All packets received for session ID {session_id.hex()}. Transmission complete.")
+
+                # send DATA-ACK back to the sender
+                ack_packet = bytearray()
+                ack_packet.append(0x04)
+                ack_packet.extend(session_id)  # append session ID
+                ack_packet.extend(packet_index.to_bytes(IDX_LENGTH, 'big'))  # append packet index
+                self.server_socket.sendto(ack_packet, session["addr"])
+                print(f"[DEBUG] Sent DATA-ACK for packet {packet_index} to {session['addr']} for session ID {session_id.hex()}")
+
+        # if the session is complete, write the file
+        if session["complete"]:
+            print(f'[DEBUG] Writing received file {session["filename"]} for session ID {session_id.hex()}')
+            try:
+                with open(session["filename"], 'wb') as f:
+                    for packet in session["received"]:
+                        if packet is not None:
+                            f.write(packet)
+                print(f'[DEBUG] File {session["filename"]} written successfully.')
+            except Exception as e:
+                print(f'[DEBUG] Error writing file {session["filename"]}: {e}')
+
+            # clean up the session
+            del self.sessions[session_id]
+            print(f"[DEBUG] Session {session_id.hex()} cleaned up.")
+
+
+    def handle_data_ack(self, packet, addr):
+        session_id = packet[:16]
+        packet_index = int.from_bytes(packet[16:18], 'big')  # next 2 bytes are the packet index
+
+        print(f"[DEBUG] Received DATA-ACK from {addr} for session ID {session_id.hex()} and packet index {packet_index}")
+
+        if session_id not in self.sessions:
+            print(f"[DEBUG] Session ID {session_id.hex()} not found in sessions.")
+            return
+
+        session = self.sessions[session_id]
+        with session["lock"]:
+            if not session["acked"][packet_index]:
+                session["acked"][packet_index] = True
+                session["timeout_status"][packet_index] = -1
+                print(f"[DEBUG] Packet {packet_index} acknowledged for session ID {session_id.hex()}")
+
+        if all(session["acked"]):
+            # if all packets are acknowledged, mark the session as complete
+            session["complete"] = True
+            print(f"[DEBUG] All packets acknowledged for session ID {session_id.hex()}. Transmission complete.")
+
+            # clean up the session
+            del self.sessions[session_id]
+            print(f"[DEBUG] Session {session_id.hex()} cleaned up.")
+
+
     def listener(self): # listen to the socket to see if there's any transmission request
         print(f"[DEBUG] Listening on port {self.port}")
 
@@ -242,152 +363,3 @@ class Server():
 if __name__ == "__main__":
     print(f"[DEBUG] Starting server with config: {sys.argv[1]}")
     server = Server(sys.argv[1])
-
-
-        # # use socket to send packet number to the receiver
-        # print("sending packet num", packet_num, "to", addr)
-        # tx_socket.sendto(str(packet_num).encode(), addr)
-
-        # # use a transmit window to determine which file should be transmitted
-        # base = 0
-        # next_seq = 0
-        # timeout_status = [0] * packet_num # -1 = ACKed, 0 = not sent, >0 = last sent time
-        # acked = [False] * packet_num  # to keep track of which packets have been acknowledged
-        # lock = threading.Lock()  # lock for thread safety
-
-        # def transmit_thread():
-        #     #Takes the transmit window and transmits every packet that is allowed to be transmitted
-        #     nonlocal base, next_seq, timeout_status, acked
-        #     while base < packet_num:
-        #         with lock:
-        #             while next_seq < base + WINDOW_SIZE and next_seq < packet_num:
-        #                 if timeout_status[next_seq] == 0:
-        #                     packet = transmit_file[next_seq]
-        #                     packet_index = next_seq.to_bytes(IDX_LENGTH, 'big')
-        #                     tx_socket.sendto(packet_index + packet, addr)
-        #                     timeout_status[next_seq] = time.time()  # record the time of sending
-        #                     print(f"[DEBUG] Sent packet {next_seq+1}/{packet_num}")
-        #                 next_seq += 1
-
-        #             # check for timeouts and resend packets if necessary
-        #             for i in range(base, min(base + WINDOW_SIZE, packet_num)):
-        #                 if not acked[i] and timeout_status[i] > 0 and time.time() - timeout_status[i] > TIMEOUT:
-        #                     # resend the packet if it has timed out
-        #                     packet = transmit_file[i]
-        #                     packet_index = i.to_bytes(IDX_LENGTH, 'big')
-        #                     tx_socket.sendto(packet_index + packet, addr)
-        #                     timeout_status[i] = time.time()
-        #                     print(f"[DEBUG] Resent packet {i+1}/{packet_num} due to timeout")
-
-        #         time.sleep(0.1)  # sleep to avoid busy waiting
-
-        # def ack_thread():
-        #     #Receives acknowledgement and updates the transmit window with sendable packets
-        #     nonlocal base, next_seq, timeout_status, acked
-        #     while base < packet_num:
-        #         try:
-        #             ack_data, _ = tx_socket.recvfrom(BUFSIZE)
-        #             ack_idx = int.from_bytes(ack_data[:IDX_LENGTH], 'big')
-        #             with lock:
-        #                 if not acked[ack_idx]:
-        #                     acked[ack_idx] = True
-        #                     timeout_status[ack_idx] = -1
-        #                     print(f"[DEBUG] Received ACK for packet {ack_idx+1}")
-        #                     if ack_idx == base:
-        #                         # move the base forward if the ACK is for the base packet
-        #                         while base < packet_num and acked[base]:
-        #                             base += 1
-        #                         next_seq = max(next_seq, base)
-        #         except socket.timeout:
-        #             continue
-
-        # #Create TX and RX threads and start doing it
-        # tx = threading.Thread(target=transmit_thread)
-        # ack = threading.Thread(target=ack_thread)
-        # tx.start()
-        # ack.start()
-        # tx.join()
-        # ack.join()
-
-        # # When done transmitting, close the threads.
-        # print("[DEBUG] Transmission complete. Closing socket.")
-        # tx_socket.close()
-
-
-        # addr = self.find_file(file_name) # addr is a tuple (hostname, port)
-        # if not addr:
-        #     print(f"[DEBUG] No peer found for file: {file_name}")
-        #     return
-
-        # # establish a client socket for downloading file
-        # self.cl_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
-        # self.cl_socket.settimeout(TIMEOUT)  # set timeout for the socket
-
-        # # Initiate three-way handshake and use a connect flag
-        # connect_flag = False
-        # while not connect_flag:
-        #     try:
-        #         # handshake
-        #         print("[DEBUG] Sending SYN")
-        #         initial_message = json.dumps({"type": "SYN", "file_name": file_name}).encode()
-        #         self.cl_socket.sendto(initial_message, addr)
-        #         data, _ = self.cl_socket.recvfrom(BUFSIZE)
-        #         response = json.loads(data.decode())
-
-        #         if response.get("type") == "SYN-ACK":
-        #             connect_flag = True
-        #             print("[DEBUG] Received SYN-ACK, sending ACK")
-        #             # send ACK
-        #             ack_message = json.dumps({"type": "ACK"}).encode()
-        #             self.cl_socket.sendto(ack_message, addr)
-        #     except socket.timeout:
-        #         # handshake failed
-        #         print("[DEBUG] Handshake timeout, retrying SYN")
-        #         continue
-
-        # # the receiver keeps a record for which part has been acked
-        # try:
-        #     pkt_count_data, _ = self.cl_socket.recvfrom(BUFSIZE)
-        #     packet_num = int(pkt_count_data.decode())
-        #     print(f"[DEBUG] Expecting {packet_num} packets for file {file_name}")
-        # except socket.timeout:
-        #     print("Failed to receive packet count, transmission aborted.")
-        #     return
-
-        # # start receiving file
-        # received = [None] * packet_num  # to keep track of received packets
-        # received_flags = [False] * packet_num  # to keep track of which packets have been acknowledged
-        # total_received = 0  # total number of packets received
-
-        # while total_received < packet_num:
-        #     try:
-        #         packet_data, _ = self.cl_socket.recvfrom(BUFSIZE)
-        #         packet_index = int.from_bytes(packet_data[:IDX_LENGTH], 'big')
-        #         packet_content = packet_data[IDX_LENGTH:]
-
-        #         if not received_flags[packet_index]:
-        #             received[packet_index] = packet_content
-        #             received_flags[packet_index] = True
-        #             total_received += 1
-        #             print(f"[DEBUG] Received packet {packet_index+1}/{packet_num}")
-
-        #             # send ACK for the received packet
-        #             ack_message = packet_index.to_bytes(IDX_LENGTH, 'big')
-        #             self.cl_socket.sendto(ack_message, addr)
-
-        #     except socket.timeout:
-        #         continue
-
-        # # transmission complete, close socket
-        # print("[DEBUG] All packets received. Closing client socket.")
-        # self.cl_socket.close()
-
-        # # write the file
-        # try:
-        #     with open(file_name, 'wb') as f:
-        #         for packet in received:
-        #             if packet is not None:
-        #                 f.write(packet)
-        #     print("File", file_name, "received successfully.")
-        # except Exception as e:
-        #     print("Error writing file:", e)
