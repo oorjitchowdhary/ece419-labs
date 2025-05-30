@@ -13,9 +13,14 @@ TIMEOUT = 0.5   # timeout time
 
 class Server():
     def __init__(self, config_file):
-        # Read the config file and initialize the port, peer_num, peer_info, content_info from the config file
+        # parse server configuration from the config file
         print("[DEBUG] Loading config:", config_file)
-        config = json.load(open(config_file, "r"))
+        try:
+            config = json.load(open(config_file, "r"))
+        except Exception as e:
+            print(f"[DEBUG] Failed to load config file {config_file}: {e}")
+            sys.exit(1)
+
         self.hostname = config["hostname"]
         self.port = config["port"]
         self.peers = config["peers"]
@@ -29,25 +34,31 @@ class Server():
         self.server_socket.bind(("", self.port)) #This is the only port you can use to receive
         self.server_socket.settimeout(1) # timeout value
 
+        # track sessions on the server
+        self.sessions = {} # session_id -> session info
+
+        # initialize the server
         self.remain_threads = True
         self.cli()
-        return
 
     def find_file(self, file_name):
         # returns a tuple of (hostname, port) of the peer that has the file
         print(f"[DEBUG] Looking for file '{file_name}' in peer list")
+
         for peer in self.peer_info:
             if file_name in peer["content_info"]:
                 print(f"[DEBUG] Found file on peer {peer['hostname']}:{peer['port']}")
                 return (peer["hostname"], peer["port"])
+
         print(f"[DEBUG] File '{file_name}' not found on any peer")
         return None
 
     def load_file(self, file_name):
         # find which server has the file
         print(f"[DEBUG] Starting file download: {file_name}")
+
         addr = self.find_file(file_name) # addr is a tuple (hostname, port)
-        if addr is None:
+        if not addr:
             print(f"[DEBUG] No peer found for file: {file_name}")
             return
 
@@ -55,10 +66,8 @@ class Server():
         self.cl_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
         self.cl_socket.settimeout(TIMEOUT)  # set timeout for the socket
 
-        # use a connect flag to determine if the file name is sent correctly
-        connect_flag = False
-
         # Initiate three-way handshake and use a connect flag
+        connect_flag = False
         while not connect_flag:
             try:
                 # handshake
@@ -264,30 +273,23 @@ class Server():
             try:
                 command_line = input()
                 if command_line == "kill":
+                    print("[DEBUG] Shutting down server.")
                     self.remain_threads = False
+                    self.server_socket.close()
                     listen_thread.join()
-
-                    if hasattr(self, 'cl_socket'):
-                        self.cl_socket.close()
-
-                    if hasattr(self, 'server_socket'):
-                        self.server_socket.close()
+                    print("[DEBUG] Server shutdown complete.")
                     break
-                #Otherwise it is a file name!
+
+                # otherwise input is a file name to load
                 print(f"[DEBUG] CLI input received: {command_line}")
                 self.load_file(command_line.strip())
+
             except EOFError:
-                print("EOFError: Exiting server.")
+                print("[DEBUG] EOFError encountered. Exiting CLI.")
                 self.remain_threads = False
+                self.server_socket.close()
                 listen_thread.join()
-
-                if hasattr(self, 'cl_socket'):
-                    self.cl_socket.close()
-
-                if hasattr(self, 'server_socket'):
-                    self.server_socket.close()
                 break
-        return
 
 
 if __name__ == "__main__":
