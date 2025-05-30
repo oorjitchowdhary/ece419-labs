@@ -2,6 +2,7 @@ import socket, sys
 import json
 import time
 import threading
+import uuid
 
 BUFSIZE = 7402
 PKTSIZE = 7400
@@ -71,12 +72,35 @@ class Server():
 
     def receive(self, file_name):
         print(f"[DEBUG] Starting to receive file: {file_name}")
-        rx_socket = self.server_socket  # reuse the server socket for receiving
 
         addr = self.find_file(file_name)  # addr is a tuple (hostname, port)
+        if not addr:
+            print(f"[DEBUG] No peer found for file: {file_name}")
+            return
+
+        session_id = uuid.uuid4().bytes  # generate a unique session ID
+        filename_bytes = file_name.encode()
+
+        # create session entry (receiver side)
+        self.sessions[session_id] = {
+            "addr": addr,
+            "total_packets": 0,  # will be set after receiving SYN-ACK
+            "received": [],  # to keep track of received packets
+            "lock": threading.Lock(),  # lock for thread safety
+            "complete": False,  # set to True when all packets are received
+        }
+
+        # send SYN packet
+        syn_packet = bytearray()
+        syn_packet.append(0x00)  # SYN packet type
+        syn_packet.extend(session_id)  # append session ID
+        syn_packet.append(len(filename_bytes))  # append length of filename
+        syn_packet.extend(filename_bytes)  # append filename
+        self.server_socket.sendto(syn_packet, addr)
+        print(f"[DEBUG] Sent SYN to {addr} for file '{file_name}' with session ID {session_id.hex()}")
 
 
-    def transmit(self, file_name, addr):
+    def transmit(self, file_name, addr, session_id):
         print(f"[DEBUG] Starting transmission to {addr} for file {file_name}")
         tx_socket = self.server_socket  # reuse the server socket for transmission
 
@@ -119,14 +143,11 @@ class Server():
 
         print(f"[DEBUG] Received SYN-ACK from {addr} for session ID {session_id.hex()} with total packets {total_packets}")
 
-        # create a session entry (receiver side)
-        self.sessions[session_id] = {
-            "addr": addr,
-            "total_packets": total_packets,
-            "received": [None] * total_packets,  # to keep track of received packets
-            "lock": threading.Lock(),  # lock for thread safety
-            "complete": False  # set to True when all packets are received
-        }
+        # update session entry (receiver side)
+        if session_id in self.sessions:
+            session = self.sessions[session_id]
+            session["total_packets"] = total_packets
+            session["received"] = [None] * total_packets
 
         # send ACK response
         response = bytearray()
