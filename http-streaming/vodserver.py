@@ -15,14 +15,25 @@ class Vod_Server():
         self.remain_threads = True
 
         # load all contents in the buffer
-        
+        self.content = self.load_contents("./content")
+        print(self.content)
+
         # listen to the http socket
         self.listen()
-        pass
 
     def load_contents(self, dir):
-        #Create a list of files and stuff that you have
-        return
+        content = {}
+        for root, _, files in os.walk(dir):
+            for file in files:
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, dir)  # relative to content/
+                filename, file_extension = os.path.splitext(rel_path)
+                content[file] = {
+                    "path": full_path,
+                    "type": file_extension[1:],  # remove dot
+                    "size": os.path.getsize(full_path)
+                }
+        return content
 
     def listen(self):
         while self.remain_threads:
@@ -69,4 +80,5 @@ class Vod_Server():
         return command_dict
 
 if __name__ == "__main__":
-    Vod_Server(int(sys.argv[1]))
+    port_id = sys.argv[1]
+    Vod_Server(int(port_id))
