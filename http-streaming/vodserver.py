@@ -1,5 +1,6 @@
 import socket, sys
 import datetime
+import threading
 import os
 
 BUFSIZE = 1024
@@ -16,7 +17,8 @@ class Vod_Server():
 
         # load all contents in the buffer
         self.content = self.load_contents("./content")
-        print(self.content)
+        print(f"[DEBUG] Loaded {len(self.content)} files from content directory.")
+        print(f"[DEBUG] Content: {self.content}")
 
         # listen to the http socket
         self.listen()
@@ -28,7 +30,7 @@ class Vod_Server():
                 full_path = os.path.join(root, file)
                 rel_path = os.path.relpath(full_path, dir)  # relative to content/
                 filename, file_extension = os.path.splitext(rel_path)
-                content[file] = {
+                content[filename + file_extension] = {
                     "path": full_path,
                     "type": file_extension[1:],  # remove dot
                     "size": os.path.getsize(full_path)
@@ -36,17 +38,88 @@ class Vod_Server():
         return content
 
     def listen(self):
+        print(f"[DEBUG] Listening on port {self.http_socket.getsockname()[1]}...")
+
         while self.remain_threads:
-            connection_socket, client_address = self.http_socket.accept()
-            msg_string = connection_socket.recv(BUFSIZE).decode()
-            
-            #Do stuff here
+            try:
+                connection_socket, client_address = self.http_socket.accept()
+                msg_string = connection_socket.recv(BUFSIZE).decode()
+                if not msg_string:
+                    print("[DEBUG] No message received, closing connection.")
+                    connection_socket.close()
+                    continue
+
+                print(f"[DEBUG] Received message: {msg_string.strip()}")
+
+                thread = threading.Thread(target=self.response, args=(msg_string, connection_socket))
+                thread.start()
+
+            except Exception as e:
+                print(f"[ERROR] An error occurred: {e}")
+                self.remain_threads = False
+                self.http_socket.close()
+                break
+
         return
-    
+
     def response(self, msg_string, connection_socket):
         #Do based on the situation if the files exist, do not exist or are unable to respond due to confidentiality
-        return
-    
+        try:
+            message = msg_string.strip().split("\r\n")
+            print(f"[DEBUG] Parsed message: {message}")
+            request_line = message[0]
+            headers = self.eval_commands(message[1:])
+
+            print(f"[DEBUG] Request Line: {request_line}")
+            method, uri, http_version = request_line.split()
+
+            # only allow GET
+            if method != "GET":
+                print("[DEBUG] Method not allowed, sending 405 response.")
+                response = f"{http_version} 405 Method Not Allowed\r\n\r\n"
+                connection_socket.sendall(response.encode())
+                connection_socket.close()
+                return
+
+            # parse the URI
+            file_idx = uri.lstrip("/")
+
+            if file_idx not in self.content:
+                print(f"[DEBUG] File {file_idx} not found, sending 404 response.")
+                response = self.generate_response_404(http_version, connection_socket)
+                connection_socket.sendall(response.encode())
+                connection_socket.close()
+                return
+
+            file_info = self.content[file_idx]
+            if "confidential" in file_info["path"]:
+                print(f"[DEBUG] File {file_idx} is confidential, sending 403 response.")
+                response = self.generate_response_403(http_version, connection_socket)
+                connection_socket.sendall(response.encode())
+                connection_socket.close()
+                return
+
+            # check for range requests
+            if "Range" in headers:
+                print(f"[DEBUG] Range request detected for {file_idx}, sending 206 response.")
+                response = self.generate_response_206(http_version, file_idx, file_info["type"], headers["Range"], connection_socket)
+                connection_socket.sendall(response.encode())
+                connection_socket.close()
+            else:
+                print(f"[DEBUG] Regular request for {file_idx}, sending 200 response.")
+                response = self.generate_response_200(http_version, file_idx, file_info["type"], connection_socket)
+                connection_socket.sendall(response.encode())
+                connection_socket.close()
+
+            print(f"[DEBUG] Response sent for {file_idx}.")
+
+        except Exception as e:
+            print(f"[ERROR] An error occurred while processing the request: {e}")
+            response = f"HTTP/1.1 500 Internal Server Error\r\n\r\n"
+            connection_socket.sendall(response.encode())
+            connection_socket.close()
+
+
     def generate_response_404(self, http_version, connection_socket):
         #Generate Response and Send
         
