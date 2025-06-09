@@ -103,12 +103,12 @@ class Vod_Server():
             if "Range" in headers:
                 print(f"[DEBUG] Range request detected for {file_idx}, sending 206 response.")
                 response = self.generate_response_206(http_version, file_idx, file_info["type"], headers["Range"], connection_socket)
-                connection_socket.sendall(response.encode())
+                connection_socket.sendall(response)
                 connection_socket.close()
             else:
                 print(f"[DEBUG] Regular request for {file_idx}, sending 200 response.")
                 response = self.generate_response_200(http_version, file_idx, file_info["type"], connection_socket)
-                connection_socket.sendall(response.encode())
+                connection_socket.sendall(response)
                 connection_socket.close()
 
             print(f"[DEBUG] Response sent for {file_idx}.")
@@ -147,14 +147,66 @@ class Vod_Server():
         return response
 
     def generate_response_200(self, http_version, file_idx, file_type, connection_socket):
-        #Generate Response and Send
-        
-        return response
+        file_path = self.content[file_idx]["path"]
+        file_size = self.content[file_idx]["size"]
+        content_type = self.generate_content_type(file_type)
+
+        try:
+            with open(file_path, "rb") as file:
+                file_content = file.read()
+
+            headers = [
+                f"{http_version} 200 OK",
+                f"Content-Type: {content_type}",
+                f"Content-Length: {file_size}",
+                f"Date: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}",
+                "Connection: close",
+                "\r\n"
+            ]
+
+            response = "\r\n".join(headers).encode() + file_content
+            return response
+
+        except Exception as e:
+            print(f"[ERROR] Failed to read file {file_idx}: {e}")
+            response = f"{http_version} 500 Internal Server Error\r\n\r\n".encode()
+            return response
 
     def generate_response_206(self, http_version, file_idx, file_type, command_parameters, connection_socket):
-        #Generate Response and Send
-        
-        return response
+        file_path = self.content[file_idx]["path"]
+        file_size = self.content[file_idx]["size"]
+        content_type = self.generate_content_type(file_type)
+
+        try:
+            range_header = command_parameters.split("=")[1]
+            start, end = range_header.split("-")
+            start = int(start) if start else 0
+            end = int(end) if end else file_size - 1
+
+            if start < 0 or end >= file_size or start > end:
+                raise ValueError("Invalid range")
+
+            with open(file_path, "rb") as file:
+                file.seek(start)
+                file_content = file.read(end - start + 1)
+
+            headers = [
+                f"{http_version} 206 Partial Content",
+                f"Content-Type: {content_type}",
+                f"Content-Length: {len(file_content)}",
+                f"Content-Range: bytes {start}-{end}/{file_size}",
+                f"Date: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}",
+                "Connection: close",
+                "\r\n"
+            ]
+
+            response = "\r\n".join(headers).encode() + file_content
+            return response
+
+        except Exception as e:
+            print(f"[ERROR] Failed to process range request for {file_idx}: {e}")
+            response = f"{http_version} 416 Range Not Satisfiable\r\n\r\n".encode()
+            return response
 
     def generate_content_type(self, file_type):
         content_types = {
