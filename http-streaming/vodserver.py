@@ -121,15 +121,31 @@ class Vod_Server():
 
 
     def generate_response_404(self, http_version, connection_socket):
-        #Generate Response and Send
-        
+        not_found_page = "<html><body><h1>404 Not Found</h1></body></html>"
+        headers = [
+            f"{http_version} 404 Not Found",
+            "Content-Type: text/html",
+            f"Content-Length: {len(not_found_page)}",
+            f"Date: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}",
+            "Connection: close",
+            "\r\n"
+        ]
+        response = "\r\n".join(headers) + not_found_page
         return response
 
     def generate_response_403(self, http_version, connection_socket):
-        #Generate Response and Send
-        
+        forbidden_page = "<html><body><h1>403 Forbidden</h1></body></html>"
+        headers = [
+            f"{http_version} 403 Forbidden",
+            "Content-Type: text/html",
+            f"Content-Length: {len(forbidden_page)}",
+            f"Date: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}",
+            "Connection: close",
+            "\r\n"
+        ]
+        response = "\r\n".join(headers) + forbidden_page
         return response
-    
+
     def generate_response_200(self, http_version, file_idx, file_type, connection_socket):
         #Generate Response and Send
         
@@ -141,8 +157,20 @@ class Vod_Server():
         return response
 
     def generate_content_type(self, file_type):
-        #Generate Headers
-        return ""
+        content_types = {
+            "mp4": "video/mp4",
+            "webm": "video/webm",
+            "mp3": "audio/mpeg",
+            "wav": "audio/wav",
+            "txt": "text/plain",
+            "html": "text/html",
+            "json": "application/json",
+            "pdf": "application/pdf",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+        }
+        return content_types.get(file_type, "application/octet-stream")
 
     def eval_commands(self, commands):
         command_dict = {}
