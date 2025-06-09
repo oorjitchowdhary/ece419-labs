@@ -43,24 +43,28 @@ class Vod_Server():
         while self.remain_threads:
             try:
                 connection_socket, client_address = self.http_socket.accept()
-                msg_string = connection_socket.recv(BUFSIZE).decode()
-                if not msg_string:
-                    print("[DEBUG] No message received, closing connection.")
-                    connection_socket.close()
-                    continue
-
-                print(f"[DEBUG] Received message: {msg_string.strip()}")
-
-                thread = threading.Thread(target=self.response, args=(msg_string, connection_socket))
+                thread = threading.Thread(target=self.persistent_handler, args=(connection_socket,))
                 thread.start()
-
             except Exception as e:
-                print(f"[ERROR] An error occurred: {e}")
+                print(f"[ERROR] Accept failed: {e}")
                 self.remain_threads = False
                 self.http_socket.close()
                 break
 
-        return
+    def persistent_handler(self, connection_socket):
+        while True:
+            try:
+                msg_string = connection_socket.recv(BUFSIZE).decode()
+                if not msg_string:
+                    break
+
+                keep_alive = self.response(msg_string, connection_socket)
+                if not keep_alive:
+                    break
+            except Exception as e:
+                print(f"[ERROR] In persistent handler: {e}")
+                break
+        connection_socket.close()
 
     def response(self, msg_string, connection_socket):
         #Do based on the situation if the files exist, do not exist or are unable to respond due to confidentiality
@@ -69,6 +73,8 @@ class Vod_Server():
             print(f"[DEBUG] Parsed message: {message}")
             request_line = message[0]
             headers = self.eval_commands(message[1:])
+            conn_type = headers.get("Connection", "close").lower()
+            keep_alive = conn_type == "keep-alive"
 
             print(f"[DEBUG] Request Line: {request_line}")
             method, uri, http_version = request_line.split()
@@ -76,51 +82,47 @@ class Vod_Server():
             # only allow GET
             if method != "GET":
                 print("[DEBUG] Method not allowed, sending 405 response.")
-                response = f"{http_version} 405 Method Not Allowed\r\n\r\n"
+                response = f"{http_version} 405 Method Not Allowed\r\nConnection: close\r\n\r\n"
                 connection_socket.sendall(response.encode())
-                connection_socket.close()
-                return
+                return False
 
             # parse the URI
             file_idx = uri.lstrip("/")
 
+            # handle 404 requests
             if file_idx not in self.content:
                 print(f"[DEBUG] File {file_idx} not found, sending 404 response.")
-                response = self.generate_response_404(http_version, connection_socket)
+                response = self.generate_response_404(http_version)
                 connection_socket.sendall(response.encode())
-                connection_socket.close()
-                return
+                return False
 
             file_info = self.content[file_idx]
+            # handle 403 requests
             if "confidential" in file_info["path"]:
                 print(f"[DEBUG] File {file_idx} is confidential, sending 403 response.")
-                response = self.generate_response_403(http_version, connection_socket)
+                response = self.generate_response_403(http_version)
                 connection_socket.sendall(response.encode())
-                connection_socket.close()
-                return
+                return False
 
-            # check for range requests
+            # handle 200 or 206 requests based on range header
             if "Range" in headers:
                 print(f"[DEBUG] Range request detected for {file_idx}, sending 206 response.")
-                response = self.generate_response_206(http_version, file_idx, file_info["type"], headers["Range"], connection_socket)
-                connection_socket.sendall(response)
-                connection_socket.close()
+                response = self.generate_response_206(http_version, file_idx, file_info["type"], headers["Range"], keep_alive)
             else:
                 print(f"[DEBUG] Regular request for {file_idx}, sending 200 response.")
-                response = self.generate_response_200(http_version, file_idx, file_info["type"], connection_socket)
-                connection_socket.sendall(response)
-                connection_socket.close()
+                response = self.generate_response_200(http_version, file_idx, file_info["type"], keep_alive)
 
-            print(f"[DEBUG] Response sent for {file_idx}.")
+            connection_socket.sendall(response)
+            print(f"[DEBUG] Response sent for {file_idx}. Keep-alive: {keep_alive}")
+            return keep_alive
 
         except Exception as e:
             print(f"[ERROR] An error occurred while processing the request: {e}")
-            response = f"HTTP/1.1 500 Internal Server Error\r\n\r\n"
+            response = f"{http_version} 500 Internal Server Error\r\nConnection: close\r\n\r\n"
             connection_socket.sendall(response.encode())
-            connection_socket.close()
+            return False
 
-
-    def generate_response_404(self, http_version, connection_socket):
+    def generate_response_404(self, http_version):
         not_found_page = "<html><body><h1>404 Not Found</h1></body></html>"
         headers = [
             f"{http_version} 404 Not Found",
@@ -133,7 +135,7 @@ class Vod_Server():
         response = "\r\n".join(headers) + not_found_page
         return response
 
-    def generate_response_403(self, http_version, connection_socket):
+    def generate_response_403(self, http_version):
         forbidden_page = "<html><body><h1>403 Forbidden</h1></body></html>"
         headers = [
             f"{http_version} 403 Forbidden",
@@ -146,7 +148,7 @@ class Vod_Server():
         response = "\r\n".join(headers) + forbidden_page
         return response
 
-    def generate_response_200(self, http_version, file_idx, file_type, connection_socket):
+    def generate_response_200(self, http_version, file_idx, file_type, keep_alive):
         file_path = self.content[file_idx]["path"]
         file_size = self.content[file_idx]["size"]
         content_type = self.generate_content_type(file_type)
@@ -155,15 +157,18 @@ class Vod_Server():
             with open(file_path, "rb") as file:
                 file_content = file.read()
 
+            last_modified = datetime.datetime.utcfromtimestamp(os.path.getmtime(file_path)).strftime('%a, %d %b %Y %H:%M:%S GMT')
+
             headers = [
                 f"{http_version} 200 OK",
                 f"Content-Type: {content_type}",
                 f"Content-Length: {file_size}",
                 f"Date: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}",
-                "Connection: close",
-                "\r\n"
+                f"Last-Modified: {last_modified}",
+                f"Connection: {'keep-alive' if keep_alive else 'close'}",
+                "Accept-Ranges: bytes",
+                "", ""
             ]
-
             response = "\r\n".join(headers).encode() + file_content
             return response
 
@@ -172,7 +177,7 @@ class Vod_Server():
             response = f"{http_version} 500 Internal Server Error\r\n\r\n".encode()
             return response
 
-    def generate_response_206(self, http_version, file_idx, file_type, command_parameters, connection_socket):
+    def generate_response_206(self, http_version, file_idx, file_type, command_parameters, keep_alive):
         file_path = self.content[file_idx]["path"]
         file_size = self.content[file_idx]["size"]
         content_type = self.generate_content_type(file_type)
@@ -183,23 +188,29 @@ class Vod_Server():
             start = int(start) if start else 0
             end = int(end) if end else file_size - 1
 
-            if start < 0 or end >= file_size or start > end:
+            if end >= file_size:
+                end = file_size - 1
+
+            if start < 0 or start > end or start >= file_size:
                 raise ValueError("Invalid range")
 
             with open(file_path, "rb") as file:
                 file.seek(start)
                 file_content = file.read(end - start + 1)
 
+            last_modified = datetime.datetime.utcfromtimestamp(os.path.getmtime(file_path)).strftime('%a, %d %b %Y %H:%M:%S GMT')
+
             headers = [
                 f"{http_version} 206 Partial Content",
                 f"Content-Type: {content_type}",
                 f"Content-Length: {len(file_content)}",
                 f"Content-Range: bytes {start}-{end}/{file_size}",
+                "Accept-Ranges: bytes",
                 f"Date: {datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}",
-                "Connection: close",
-                "\r\n"
+                f"Last-Modified: {last_modified}",
+                f"Connection: {'keep-alive' if keep_alive else 'close'}",
+                "", ""
             ]
-
             response = "\r\n".join(headers).encode() + file_content
             return response
 
@@ -212,15 +223,20 @@ class Vod_Server():
         content_types = {
             "mp4": "video/mp4",
             "webm": "video/webm",
+            "ogg": "video/webm",
             "mp3": "audio/mpeg",
             "wav": "audio/wav",
             "txt": "text/plain",
+            "css": "text/css",
             "html": "text/html",
-            "json": "application/json",
-            "pdf": "application/pdf",
+            "htm": "text/html",
+            "gif": "image/gif",
             "jpg": "image/jpeg",
             "jpeg": "image/jpeg",
             "png": "image/png",
+            "js": "application/javascript",
+            "json": "application/json",
+            "pdf": "application/pdf",
         }
         return content_types.get(file_type, "application/octet-stream")
 
