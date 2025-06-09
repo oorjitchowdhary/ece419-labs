@@ -104,10 +104,15 @@ class Vod_Server():
                 connection_socket.sendall(response.encode())
                 return False
 
-            # handle 200 or 206 requests based on range header
-            if "Range" in headers and file_info["size"] > LARGEST_CONTENT_SIZE:
-                print(f"[DEBUG] Range request detected for {file_idx}, sending 206 response.")
-                response = self.generate_response_206(http_version, file_idx, file_info["type"], headers["Range"], keep_alive)
+            is_large_file = file_info["size"] > LARGEST_CONTENT_SIZE
+            if is_large_file:
+                print(f"[DEBUG] File {file_idx} is large ({file_info['size']} bytes), handling with range requests.")
+                if "Range" in headers:
+                    print(f"[DEBUG] Range request for {file_idx}, sending 206 response.")
+                    response = self.generate_response_206(http_version, file_idx, file_info["type"], headers["Range"], keep_alive)
+                else:
+                    print(f"[DEBUG] Large file request with no range, forcing 206 response with 5 MB limit.")
+                    response = self.generate_response_206(http_version, file_idx, file_info["type"], "bytes=0-", keep_alive)
             else:
                 print(f"[DEBUG] Regular request for {file_idx}, sending 200 response.")
                 response = self.generate_response_200(http_version, file_idx, file_info["type"], keep_alive)
