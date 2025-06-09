@@ -105,7 +105,7 @@ class Vod_Server():
                 return False
 
             # handle 200 or 206 requests based on range header
-            if "Range" in headers:
+            if "Range" in headers and file_info["size"] > LARGEST_CONTENT_SIZE:
                 print(f"[DEBUG] Range request detected for {file_idx}, sending 206 response.")
                 response = self.generate_response_206(http_version, file_idx, file_info["type"], headers["Range"], keep_alive)
             else:
@@ -183,13 +183,18 @@ class Vod_Server():
         content_type = self.generate_content_type(file_type)
 
         try:
-            range_header = command_parameters.split("=")[1]
-            start, end = range_header.split("-")
-            start = int(start) if start else 0
-            end = int(end) if end else file_size - 1
+            range_header = command_parameters.split("=")[1].strip()
+            if "-" not in range_header:
+                raise ValueError("Invalid range format")
+            
+            parts = range_header.split("-", 1)
+            start = int(parts[0]) if parts[0] else 0
+            if parts[1]:
+                end = int(parts[1])
+            else:
+                end = min(start + LARGEST_CONTENT_SIZE - 1, file_size - 1)
 
-            if end >= file_size:
-                end = file_size - 1
+            end = min(end, file_size - 1)
 
             if start < 0 or start > end or start >= file_size:
                 raise ValueError("Invalid range")
@@ -242,10 +247,13 @@ class Vod_Server():
 
     def eval_commands(self, commands):
         command_dict = {}
-        for item in commands[1:]:
+        for item in commands:
+            if ':' not in item or not item.strip():
+                continue
             item = item.rstrip()
-            splitted_item = item.split(":")
-            command_dict[splitted_item[0]] = splitted_item[1].strip()
+            splitted_item = item.split(":", 1)
+            if len(splitted_item) == 2:
+                command_dict[splitted_item[0]] = splitted_item[1].strip()
         return command_dict
 
 if __name__ == "__main__":
