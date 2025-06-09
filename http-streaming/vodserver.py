@@ -67,7 +67,6 @@ class Vod_Server():
         connection_socket.close()
 
     def response(self, msg_string, connection_socket):
-        #Do based on the situation if the files exist, do not exist or are unable to respond due to confidentiality
         try:
             message = msg_string.strip().split("\r\n")
             print(f"[DEBUG] Parsed message: {message}")
@@ -104,6 +103,7 @@ class Vod_Server():
                 connection_socket.sendall(response.encode())
                 return False
 
+            # handle 200 or 206 responses based on file size and range header
             is_large_file = file_info["size"] > LARGEST_CONTENT_SIZE
             if is_large_file:
                 print(f"[DEBUG] File {file_idx} is large ({file_info['size']} bytes), handling with range requests.")
